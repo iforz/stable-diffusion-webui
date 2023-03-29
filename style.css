@@ -1,4 +1,6 @@
-
+[id^="setting_"] > div[style*="position: absolute"] {
+    display: none !important;
+}
 /* general gradio fixes */
 
 :root, .dark{

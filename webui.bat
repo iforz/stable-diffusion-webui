@@ -5,6 +5,7 @@ if not defined VENV_DIR (set "VENV_DIR=%~dp0%venv")
 
 
 set ERROR_REPORTING=FALSE
+set COMMANDLINE_ARGS=--skip-torch-cuda-test --no-half
 
 mkdir tmp 2>NUL
 
