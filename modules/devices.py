@@ -1,6 +1,12 @@
 import sys
 import contextlib
 import torch
+import torch_directml
+from modules import errors
+from modules.sd_hijack_utils import CondFunc
+from packaging import version
+from functools import reduce
+import operator
 from modules import errors
 
 if sys.platform == "darwin":
@@ -30,12 +36,24 @@ def get_cuda_device_string():
     return "cuda"
 
 
+def get_dml_device_string():
+    from modules import shared
+
+    if shared.cmd_opts.device_id is not None:
+        return f"privateuseone:{shared.cmd_opts.device_id}"
+
+    return "privateuseone:0"
+
+
 def get_optimal_device_name():
     if torch.cuda.is_available():
         return get_cuda_device_string()
 
     if has_mps():
         return "mps"
+
+    if torch_directml.is_available():
+        return get_dml_device_string()
 
     return "cpu"
 
@@ -72,10 +90,26 @@ def enable_tf32():
         torch.backends.cudnn.allow_tf32 = True
 
 
-
 errors.run(enable_tf32, "Enabling TF32")
 
 cpu = torch.device("cpu")
+adl = None
+hMEM = None
+try:
+    dml = torch_directml.device(torch_directml.default_device())
+    if dml.type == "privateuseone" and "AMD" in torch_directml.device_name(dml.index):
+        from modules import atiadlxx
+        adl = atiadlxx.ATIADLxx()
+        hMEM = adl.getMemoryInfo2(0).iHyperMemorySize
+    else:
+        print("Warning: experimental graphic memory optimization is disabled due to gpu vendor. Currently this optimization is only available for AMDGPUs.")
+except RuntimeError as e:
+    if str(e) == 'NOT_WINDOWS':
+        print("Warning: experimental graphic memory optimization for AMDGPU is disabled. Because this is not Windows platform.")
+    else:
+        print("Warning: experimental graphic memory optimization for AMDGPU is disabled. Because there is an unknown error.")
+except FileNotFoundError:
+    print("Warning: memory optimization for AMDGPU is disabled. Because couldn't find 'atiadlxx.dll'. Please install GPU driver downloaded from AMD.com.")
 device = device_interrogate = device_gfpgan = device_esrgan = device_codeformer = None
 dtype = torch.float16
 dtype_vae = torch.float16
@@ -150,3 +184,87 @@ def test_for_nans(x, where):
     message += " Use --disable-nan-check commandline argument to disable this check."
 
     raise NansException(message)
+
+
+# MPS workaround for https://github.com/pytorch/pytorch/issues/89784
+def cumsum_fix(input, cumsum_func, *args, **kwargs):
+    if input.device.type == 'mps':
+        output_dtype = kwargs.get('dtype', input.dtype)
+        if output_dtype == torch.int64:
+            return cumsum_func(input.cpu(), *args, **kwargs).to(input.device)
+        elif cumsum_needs_bool_fix and output_dtype == torch.bool or cumsum_needs_int_fix and (output_dtype == torch.int8 or output_dtype == torch.int16):
+            return cumsum_func(input.to(torch.int32), *args, **kwargs).to(torch.int64)
+    return cumsum_func(input, *args, **kwargs)
+
+
+class GroupNorm(torch.nn.GroupNorm):
+    def forward(self, x):
+        if (x.dtype == torch.float16 or self.weight.dtype == torch.float16) and x.device.type == 'privateuseone':
+            self.weight = torch.nn.Parameter(self.weight.float())
+            self.bias = torch.nn.Parameter(self.bias.float())
+            return super().forward(x.float()).type(x.dtype)
+        else:
+            return super().forward(x)
+
+
+class LayerNorm(torch.nn.LayerNorm):
+    def forward(self, x):
+        if (x.dtype == torch.float16 or self.weight.dtype == torch.float16) and x.device.type == 'privateuseone':
+            self.weight = torch.nn.Parameter(self.weight.float())
+            if self.bias is not None and self.bias.dtype == torch.float16:
+                self.bias = torch.nn.Parameter(self.bias.float())
+            return super().forward(x.float()).type(x.dtype)
+        else:
+            return super().forward(x)
+
+
+class Linear(torch.nn.Linear):
+    def forward(self, x):
+        if (x.dtype == torch.float16 or self.weight.dtype == torch.float16) and x.device.type == 'privateuseone':
+            self.weight = torch.nn.Parameter(self.weight.float())
+            if self.bias is not None and self.bias.dtype == torch.float16:
+                self.bias = torch.nn.Parameter(self.bias.float())
+            return super().forward(x.float()).type(x.dtype)
+        else:
+            return super().forward(x)
+
+
+class Conv2d(torch.nn.Conv2d):
+    def forward(self, x):
+        if (x.dtype == torch.float16 or self.weight.dtype == torch.float16) and x.device.type == 'privateuseone':
+            self.weight = torch.nn.Parameter(self.weight.float())
+            if self.bias is not None and self.bias.dtype == torch.float16:
+                self.bias = torch.nn.Parameter(self.bias.float())
+            return super().forward(x.float()).type(x.dtype)
+        else:
+            return super().forward(x)
+
+
+_pad = torch.nn.functional.pad
+def pad(input, pad, mode='constant', value=None):
+    if input.dtype == torch.float16 and input.device.type == 'privateuseone':
+        return _pad(input.float(), pad, mode, value).type(input.dtype)
+    else:
+        return _pad(input, pad, mode, value)
+
+
+_cumsum = torch.Tensor.cumsum
+def cumsum(self, *args, **kwargs):
+    if self.dtype == torch.bool:
+        return _cumsum(self.int(), *args, **kwargs)
+    else:
+        return _cumsum(self, *args, **kwargs)
+
+
+_cat = torch.cat
+def cat(tensors, *args, **kwargs):
+    _tensors = []
+    for i in range(len(tensors)):
+        _tensors.append(tensors[i].type(dtype))
+    return _cat(_tensors, *args, **kwargs)
+
+
+if torch_directml.is_available():
+    torch.Tensor.cumsum = cumsum
+
+    CondFunc('torchsde._brownian.brownian_interval._randn', lambda _, size, dtype, device, seed: torch.randn(size, dtype=dtype, device=torch.device("cpu"), generator=torch.Generator(torch.device("cpu")).manual_seed(int(seed))).to(device), lambda _, size, dtype, device, seed: device.type == 'privateuseone')

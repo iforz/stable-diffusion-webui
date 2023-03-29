@@ -167,7 +167,7 @@ def git_pull_recursive(dir):
 def version_check(commit):
     try:
         import requests
-        commits = requests.get('https://api.github.com/repos/AUTOMATIC1111/stable-diffusion-webui/branches/master').json()
+        commits = requests.get('https://api.github.com/repos/lshqqytiger/stable-diffusion-webui-directml/branches/master').json()
         if commit != "<none>" and commits['commit']['sha'] != commit:
             print("--------------------------------------------------------")
             print("| You are not up to date with the most recent release. |")
@@ -206,6 +206,10 @@ def list_extensions(settings_file):
         print(e, file=sys.stderr)
 
     disabled_extensions = set(settings.get('disabled_extensions', []))
+    disable_all_extensions = settings.get('disable_all_extensions', 'none')
+
+    if disable_all_extensions != 'none':
+        return []
 
     return [x for x in os.listdir(extensions_dir) if x not in disabled_extensions]
 
@@ -221,7 +225,9 @@ def run_extensions_installers(settings_file):
 def prepare_environment():
     global skip_install
 
-    torch_command = os.environ.get('TORCH_COMMAND', "pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117")
+    pip_installer_location = os.environ.get('PIP_INSTALLER_LOCATION', None)
+
+    torch_command = os.environ.get('TORCH_COMMAND', "pip install torch==1.13.1 torchvision==0.14.1 torch-directml")
     requirements_file = os.environ.get('REQS_FILE', "requirements_versions.txt")
 
     xformers_package = os.environ.get('XFORMERS_PACKAGE', 'xformers==0.0.16rc425')
@@ -229,15 +235,15 @@ def prepare_environment():
     clip_package = os.environ.get('CLIP_PACKAGE', "git+https://github.com/openai/CLIP.git@d50d76daa670286dd6cacf3bcd80b5e4823fc8e1")
     openclip_package = os.environ.get('OPENCLIP_PACKAGE', "git+https://github.com/mlfoundations/open_clip.git@bb6e834e9c70d9c27d0dc3ecedeebeaeb1ffad6b")
 
-    stable_diffusion_repo = os.environ.get('STABLE_DIFFUSION_REPO', "https://github.com/Stability-AI/stablediffusion.git")
+    xformers_windows_package = os.environ.get('XFORMERS_WINDOWS_PACKAGE', 'https://github.com/C43H66N12O12S2/stable-diffusion-webui/releases/download/f/xformers-0.0.14.dev0-cp310-cp310-win_amd64.whl')
+
     taming_transformers_repo = os.environ.get('TAMING_TRANSFORMERS_REPO', "https://github.com/CompVis/taming-transformers.git")
-    k_diffusion_repo = os.environ.get('K_DIFFUSION_REPO', 'https://github.com/crowsonkb/k-diffusion.git')
     codeformer_repo = os.environ.get('CODEFORMER_REPO', 'https://github.com/sczhou/CodeFormer.git')
     blip_repo = os.environ.get('BLIP_REPO', 'https://github.com/salesforce/BLIP.git')
+    sd_repo = os.environ.get('BLIP_REPO', 'https://github.com/lshqqytiger/stablediffusion-directml.git')
+    k_diffusion_repo = os.environ.get('BLIP_REPO', 'https://github.com/lshqqytiger/k-diffusion-directml.git')
 
-    stable_diffusion_commit_hash = os.environ.get('STABLE_DIFFUSION_COMMIT_HASH', "47b6b607fdd31875c9279cd2f4f16b92e4ea958e")
     taming_transformers_commit_hash = os.environ.get('TAMING_TRANSFORMERS_COMMIT_HASH', "24268930bf1dce879235a7fddd0b2355b84d7ea6")
-    k_diffusion_commit_hash = os.environ.get('K_DIFFUSION_COMMIT_HASH', "5b3af030dd83e0297272d861c19477735d0317ec")
     codeformer_commit_hash = os.environ.get('CODEFORMER_COMMIT_HASH', "c5b4593074ba6214284d6acd5f1719b6c5d739af")
     blip_commit_hash = os.environ.get('BLIP_COMMIT_HASH', "48211a1594f1321b00f14c9f7a5b4813144b2fb9")
 
@@ -251,9 +257,6 @@ def prepare_environment():
 
     if args.reinstall_torch or not is_installed("torch") or not is_installed("torchvision"):
         run(f'"{python}" -m {torch_command}', "Installing torch and torchvision", "Couldn't install torch", live=True)
-
-    if not args.skip_torch_cuda_test:
-        run_python("import torch; assert torch.cuda.is_available(), 'Torch is not able to use GPU; add --skip-torch-cuda-test to COMMANDLINE_ARGS variable to disable this check'")
 
     if not is_installed("gfpgan"):
         run_pip(f"install {gfpgan_package}", "gfpgan")
@@ -281,11 +284,11 @@ def prepare_environment():
 
     os.makedirs(os.path.join(script_path, dir_repos), exist_ok=True)
 
-    git_clone(stable_diffusion_repo, repo_dir('stable-diffusion-stability-ai'), "Stable Diffusion", stable_diffusion_commit_hash)
     git_clone(taming_transformers_repo, repo_dir('taming-transformers'), "Taming Transformers", taming_transformers_commit_hash)
-    git_clone(k_diffusion_repo, repo_dir('k-diffusion'), "K-diffusion", k_diffusion_commit_hash)
     git_clone(codeformer_repo, repo_dir('CodeFormer'), "CodeFormer", codeformer_commit_hash)
     git_clone(blip_repo, repo_dir('BLIP'), "BLIP", blip_commit_hash)
+    git_clone(sd_repo, repo_dir('stable-diffusion-stability-ai'), "stable-diffusion-stability-ai")
+    git_clone(k_diffusion_repo, repo_dir('k-diffusion'), "k-diffusion")
 
     if not is_installed("lpips"):
         run_pip(f"install -r \"{os.path.join(repo_dir('CodeFormer'), 'requirements.txt')}\"", "requirements for CodeFormer")
@@ -317,8 +320,6 @@ def tests(test_dir):
     if "--ckpt" not in sys.argv:
         sys.argv.append("--ckpt")
         sys.argv.append(os.path.join(script_path, "test/test_files/empty.pt"))
-    if "--skip-torch-cuda-test" not in sys.argv:
-        sys.argv.append("--skip-torch-cuda-test")
     if "--disable-nan-check" not in sys.argv:
         sys.argv.append("--disable-nan-check")
     if "--no-tests" not in sys.argv:

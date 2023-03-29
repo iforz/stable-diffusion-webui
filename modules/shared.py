@@ -55,11 +55,17 @@ ui_reorder_categories = [
 ]
 
 cmd_opts.disable_extension_access = (cmd_opts.share or cmd_opts.listen or cmd_opts.server_name) and not cmd_opts.enable_insecure_extension_access
+if devices.adl is None or devices.hMEM is None or (cmd_opts.device_id is not None and cmd_opts.device_id != "0"):
+    print("Disabled experimental graphic memory optimizations.")
+    cmd_opts.disable_experimental_memopt = True
+
 
 devices.device, devices.device_interrogate, devices.device_gfpgan, devices.device_esrgan, devices.device_codeformer = \
     (devices.cpu if any(y in cmd_opts.use_cpu for y in [x, 'all']) else devices.get_optimal_device() for x in ['sd', 'interrogate', 'gfpgan', 'esrgan', 'codeformer'])
 
 device = devices.device
+adl = devices.adl
+hMEM = devices.hMEM
 weight_load_location = None if cmd_opts.lowram else "cpu"
 
 batch_cond_uncond = cmd_opts.always_batch_cond_uncond or not (cmd_opts.lowvram or cmd_opts.medvram)
@@ -70,6 +76,23 @@ config_filename = cmd_opts.ui_settings_file
 os.makedirs(cmd_opts.hypernetwork_dir, exist_ok=True)
 hypernetworks = {}
 loaded_hypernetworks = []
+
+
+if device.type == 'privateuseone':
+    if devices.device_interrogate.type == 'privateuseone':
+        cmd_opts.use_cpu.append('interrogate')
+        devices.device_interrogate = devices.cpu
+        print('Interrogations are fallen back to cpu. This doesn\'t affect on image generation. But if you want to use interrogate (CLIP or DeepBooru), check out this issue: https://github.com/lshqqytiger/stable-diffusion-webui-directml/issues/10')
+    
+    if not cmd_opts.no_half:
+        import torch
+        torch.cat = devices.cat
+
+        torch.nn.GroupNorm = devices.GroupNorm
+        torch.nn.LayerNorm = devices.LayerNorm
+        torch.nn.Linear = devices.Linear
+        torch.nn.Conv2d = devices.Conv2d
+        torch.nn.functional.pad = devices.pad
 
 
 def reload_hypernetworks():
@@ -394,7 +417,7 @@ options_templates.update(options_section(('ui', "Live previews"), {
     "live_previews_enable": OptionInfo(True, "Show live previews of the created image"),
     "show_progress_grid": OptionInfo(True, "Show previews of all images generated in a batch as a grid"),
     "show_progress_every_n_steps": OptionInfo(10, "Show new live preview image every N sampling steps. Set to -1 to show after completion of batch.", gr.Slider, {"minimum": -1, "maximum": 32, "step": 1}),
-    "show_progress_type": OptionInfo("Approx NN", "Image creation progress preview mode", gr.Radio, {"choices": ["Full", "Approx NN", "Approx cheap"]}),
+    "show_progress_type": OptionInfo("Approx cheap", "Image creation progress preview mode", gr.Radio, {"choices": ["Full", "Approx NN", "Approx cheap"]}),
     "live_preview_content": OptionInfo("Prompt", "Live preview subject", gr.Radio, {"choices": ["Combined", "Prompt", "Negative prompt"]}),
     "live_preview_refresh_period": OptionInfo(1000, "Progressbar/preview update period, in milliseconds")
 }))
@@ -422,7 +445,8 @@ options_templates.update(options_section(('postprocessing', "Postprocessing"), {
 }))
 
 options_templates.update(options_section((None, "Hidden options"), {
-    "disabled_extensions": OptionInfo([], "Disable those extensions"),
+    "disabled_extensions": OptionInfo([], "Disable these extensions"),
+    "disable_all_extensions": OptionInfo("none", "Disable all extensions (preserves the list of disabled extensions)", gr.Radio, {"choices": ["none", "extra", "all"]}),
     "sd_checkpoint_hash": OptionInfo("", "SHA256 hash of the current checkpoint"),
 }))
 
